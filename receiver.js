@@ -1,141 +1,134 @@
-const context = cast.framework.CastReceiverContext.getInstance();
-const playerManager = context.getPlayerManager();
+window.onload = function () {
+    cast.receiver.logger.setLevelValue(0);
+    window.castReceiverManager = cast.receiver.CastReceiverManager.getInstance();
+    console.log('Starting Receiver Manager');
 
-// Debug Logger
-const castDebugLogger = cast.debug.CastDebugLogger.getInstance();
-const LOG_TAG = 'MyAPP.LOG';
+    // handler for the 'ready' event
+    castReceiverManager.onReady = function (event) {
+        console.log('Received Ready event: ' + JSON.stringify(event.data));
+        window.castReceiverManager.setApplicationState("Application status is ready...");
+        startApp();        
+    };
 
-// Enable debug logger and show a 'DEBUG MODE' overlay at top left corner.
-castDebugLogger.setEnabled(true);
+    // handler for 'senderconnected' event
+    castReceiverManager.onSenderConnected = function (event) {
+        console.log('Received Sender Connected event: ' + event.data);
+        console.log(window.castReceiverManager.getSender(event.data).userAgent);
+    };
 
-// Show debug overlay
-// castDebugLogger.showDebugLogs(true);
+    // handler for 'senderdisconnected' event
+    castReceiverManager.onSenderDisconnected = function (event) {
+        console.log('Received Sender Disconnected event: ' + event.data);
+        if (window.castReceiverManager.getSenders().length == 0) {
+            window.close();
+        }
+    };
 
-// Set verbosity level for Core events.
-castDebugLogger.loggerLevelByEvents = {
-  'cast.framework.events.category.CORE': cast.framework.LoggerLevel.INFO,
-  'cast.framework.events.EventType.MEDIA_STATUS': cast.framework.LoggerLevel.DEBUG
-}
+    // handler for 'systemvolumechanged' event
+    castReceiverManager.onSystemVolumeChanged = function (event) {
+        console.log('Received System Volume Changed event: ' + event.data['level'] + ' ' +
+            event.data['muted']);
+    };
 
-// Set verbosity level for custom tags.
-castDebugLogger.loggerLevelByTags = {
-    LOG_TAG: cast.framework.LoggerLevel.DEBUG,
+    // create a CastMessageBus to handle messages for a custom namespace
+    window.messageBus = window.castReceiverManager.getCastMessageBus('urn:x-cast:com.google.cast.countdown.timer');
+
+    // handler for the CastMessageBus message event
+    window.messageBus.onMessage = function (event) {
+        console.log('Message [' + event.senderId + ']: ' + event.data);
+
+        var messages = event.data.split(",");
+        var eventType = messages[0];
+
+        if (eventType == "play") {
+            var duration = messages[1];
+            startTimer(duration);
+        }
+        else if (eventType == "pause") {
+            pause();
+        }
+        else if (eventType == "resume") {
+            resume();
+        }
+        else if (eventType == "stop") {
+            stop();
+        }
+
+        // inform all senders on the CastMessageBus of the incoming message event
+        // sender message listener will be invoked
+        window.messageBus.send(event.senderId, event.data);
+    }
+
+    // initialize the CastReceiverManager with an application status message
+    window.castReceiverManager.start({ statusText: "Application is starting" });
+    console.log('Receiver Manager started');
 };
 
-function makeRequest (method, url) {
-  return new Promise(function (resolve, reject) {
-    let xhr = new XMLHttpRequest();
-    xhr.open(method, url);
-    xhr.onload = function () {
-      if (this.status >= 200 && this.status < 300) {
-        resolve(JSON.parse(xhr.response));
-      } else {
-        reject({
-          status: this.status,
-          statusText: xhr.statusText
-        });
-      }
-    };
-    xhr.onerror = function () {
-      reject({
-        status: this.status,
-        statusText: xhr.statusText
-      });
-    };
-    xhr.send();
-  });
+function startApp() {
+    displayText("Set a time in the app");
 }
 
-playerManager.setMessageInterceptor(
-  cast.framework.messages.MessageType.LOAD,
-  request => {
-    castDebugLogger.info(LOG_TAG, 'Intercepting LOAD request');
+var secondsRemaining;
+var paused = false;
+var timer;
 
-    // Map contentUrl to entity
-    if (request.media && request.media.entity) {
-      request.media.contentUrl = request.media.entity;
+var timerFunction = function () {
+    if (paused)
+        return;
+
+    if (!timer)
+        return;
+    
+    displayText(renderTimer(secondsRemaining));
+
+    if (--secondsRemaining < 0) {
+        timesUp();        
     }
+};
 
-    return new Promise((resolve, reject) => {
-      // Load content from playable URL if populated
-      if(request.media.contentUrl) {
-        castDebugLogger.warn(LOG_TAG, 'Playable URL:', request.media.contentUrl);
-        return resolve(request);
-      }
-
-      // Fetch content repository by requested contentId
-      makeRequest('GET', 'https://tse-summit.firebaseio.com/content.json?orderBy=%22$key%22&equalTo=%22'+ request.media.contentId + '%22')
-        .then(function (data) {
-          let item = data[request.media.contentId];
-          if(!item) {
-            // Content could not be found in repository
-            castDebugLogger.error(LOG_TAG, 'Content not found');
-            reject();
-          } else {
-            // Adjusting request to make requested content playable
-            request.media.contentUrl = item.stream.hls;
-            request.media.contentType = 'application/x-mpegurl';
-            castDebugLogger.warn(LOG_TAG, 'Playable URL:', request.media.contentUrl);
-
-            // Add metadata
-            let metadata = new cast.framework.messages.MovieMediaMetadata();
-            metadata.metadataType = cast.framework.messages.MetadataType.MOVIE;
-            metadata.title = item.title;
-            metadata.subtitle = item.author;
-
-            request.media.metadata = metadata;
-
-            // Resolve request
-            resolve(request);
-          }
-      });
-    });
-  });
-
-// Optimizing for smart displays
-const touchControls = cast.framework.ui.Controls.getInstance();
-const playerData = new cast.framework.ui.PlayerData();
-const playerDataBinder = new cast.framework.ui.PlayerDataBinder(playerData);
-
-let browseItems = getBrowseItems();
-
-function getBrowseItems() {
-  let browseItems = [];
-  makeRequest('GET', 'https://tse-summit.firebaseio.com/content.json')
-  .then(function (data) {
-    for (let key in data) {
-      let item = new cast.framework.ui.BrowseItem();
-      item.entity = key;
-      item.title = data[key].title;
-      item.subtitle = data[key].description;
-      item.image = new cast.framework.messages.Image(data[key].poster);
-      item.imageType = cast.framework.ui.BrowseImageType.MOVIE;
-      browseItems.push(item);
-    }
-  });
-  return browseItems;
+function timesUp() {
+    playSound("time_expired");
+    clearInterval(timer);
 }
 
-let browseContent = new cast.framework.ui.BrowseContent();
-browseContent.title = 'Up Next';
-browseContent.items = browseItems;
-browseContent.targetAspectRatio =
-  cast.framework.ui.BrowseImageAspectRatio.LANDSCAPE_16_TO_9;
+function startTimer(durationInSeconds) {
+    secondsRemaining = durationInSeconds;
+    timer = setInterval(timerFunction, 1000);
+}
 
-playerDataBinder.addEventListener(
-  cast.framework.ui.PlayerDataEventType.MEDIA_CHANGED,
-  (e) => {
-    if (!e.value) return;
+function pause() {
+    paused = true;
+}
 
-    // Clear default buttons and re-assign
-    touchControls.clearDefaultSlotAssignments();
-    touchControls.assignButton(
-      cast.framework.ui.ControlsSlot.SLOT_1,
-      cast.framework.ui.ControlsButton.SEEK_BACKWARD_30
-    );
+function resume() {
+    paused = false;
+}
 
-    // Media browse
-    touchControls.setBrowseContent(browseContent);
-  });
+function stop() {
+    if (timer != null) {
+        clearInterval(timer);
+        timer = null;
+        startApp();
+    }
+}
 
-context.start();
+function playSound(soundObj) {
+    var sound = document.getElementById(soundObj);
+    sound.play();
+}
+
+function renderTimer(secondsRemaining) {
+    var minutes = parseInt(secondsRemaining / 60, 10);
+    var seconds = parseInt(secondsRemaining % 60, 10);
+
+    minutes = minutes < 10 ? "0" + minutes : minutes;
+    seconds = seconds < 10 ? "0" + seconds : seconds;
+
+    return minutes + ":" + seconds;
+}
+
+function displayText(text) {
+    console.log(text);
+    document.getElementById("message").innerHTML = text;
+    window.castReceiverManager.setApplicationState(text);
+};
